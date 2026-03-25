@@ -1,0 +1,10 @@
+{
+  "name": "@soulfield/lens-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Soulfield Lens — AI content validation via 7-lens framework",
+  "main": "mcp-server.cjs",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.23.0",
+    "zod": "^4.1.13"
+  }
+}
