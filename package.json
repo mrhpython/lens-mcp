@@ -1,8 +1,31 @@
 {
   "name": "@soulfield/lens-mcp",
   "version": "1.0.0",
-  "description": "MCP server for Soulfield Lens — AI content validation via 9-lens framework (v3.1)",
+  "description": "MCP server for AI content validation — multi-dimensional quality checks for LLM output",
   "main": "mcp-server.cjs",
+  "license": "MIT",
+  "author": "Soulfield <hello@soulfield.one>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/soulfield/lens-mcp"
+  },
+  "keywords": [
+    "mcp",
+    "ai-validation",
+    "llm",
+    "content-validation",
+    "guardrails",
+    "hallucination-detection",
+    "model-context-protocol"
+  ],
+  "files": [
+    "mcp-server.cjs",
+    "package.json",
+    "README.md"
+  ],
+  "bin": {
+    "soulfield-lens-mcp": "mcp-server.cjs"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.23.0",
     "zod": "^4.1.13"
