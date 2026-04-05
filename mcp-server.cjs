@@ -172,14 +172,14 @@ server.registerTool(
 
 /**
  * Tool: scrub_pii
- * PII-only scan using regex — instant, no LLM, no auth needed.
+ * PII-only scan using regex — instant, no LLM. Requires API key.
  * Calls POST /v1/scrub.
  */
 server.registerTool(
     "scrub_pii",
     {
         title: "Scrub PII",
-        description: "Scan text for PII (emails, phone numbers, SSNs, credit cards, etc.) using regex. Returns scrubbed text with PII replaced by type markers, plus a list of findings. Instant — no LLM call, no auth required.",
+        description: "Scan text for PII (emails, phone numbers, SSNs, credit cards, etc.) using regex. Returns scrubbed text with PII replaced by type markers, plus a list of findings. Instant — no LLM call. Requires SOULFIELD_API_KEY.",
         inputSchema: {
             text: z.string().describe("The text to scan for PII")
         }
@@ -187,6 +187,7 @@ server.registerTool(
     async ({ text }) => {
         try {
             const result = await apiRequest("POST", "/v1/scrub", { text }, {
+                apiKey: API_KEY,
                 timeout: 10000  // Regex-only, should be fast
             });
 
