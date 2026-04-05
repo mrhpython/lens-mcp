@@ -6,7 +6,7 @@
  * Cursor, and other MCP-compatible agents.
  *
  * Tools:
- *   - validate_content: Full 9-lens validation of AI-generated content
+ *   - validate_content: Multi-dimensional validation of AI-generated content
  *   - scrub_pii: PII-only scan using regex (instant, no LLM)
  *   - lens_health: Check if Lens API service is running
  *
@@ -123,14 +123,14 @@ function apiRequest(method, path, body, options = {}) {
 
 /**
  * Tool: validate_content
- * Full 9-lens validation of AI-generated content.
+ * Multi-dimensional validation of AI-generated content.
  * Calls POST /v1/validate with API key auth.
  */
 server.registerTool(
     "validate_content",
     {
-        title: "Validate Content (7-Lens)",
-        description: "Run full Soulfield Lens 9-lens validation on AI-generated content. Returns pass/fail, score (0-100), per-lens results, and violation details. Requires SOULFIELD_API_KEY. Supports domains: general, finance, marketing, legal.",
+        title: "Validate Content",
+        description: "Run multi-dimensional validation on AI-generated content. Returns pass/fail, score (0-100), per-dimension results, and violation details. Requires SOULFIELD_API_KEY. Supports domains: general, finance, marketing, legal.",
         inputSchema: {
             text: z.string().describe("The AI-generated content to validate"),
             domain: z.enum(["general", "finance", "marketing", "legal"]).optional().describe("Domain context for validation (default: general)")
