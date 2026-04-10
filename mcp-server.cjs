@@ -26,6 +26,7 @@ const { z } = require("zod/v3");
 
 const API_BASE = process.env.SOULFIELD_API_BASE || "http://localhost:8002";
 const API_KEY = process.env.SOULFIELD_API_KEY || "";
+const VALIDATE_TIMEOUT_MS = parseInt(process.env.SOULFIELD_VALIDATE_TIMEOUT_MS || "180000", 10);
 
 // Create MCP Server
 const server = new McpServer({
@@ -77,7 +78,7 @@ function apiRequest(method, path, body, options = {}) {
             path: url.pathname + url.search,
             method: method,
             headers: headers,
-            timeout: options.timeout || 60000
+            timeout: options.timeout || VALIDATE_TIMEOUT_MS
         };
 
         const req = http.request(reqOptions, (res) => {
@@ -151,7 +152,7 @@ server.registerTool(
 
             const result = await apiRequest("POST", "/v1/validate", payload, {
                 apiKey: API_KEY,
-                timeout: 60000  // LLM calls can take a while
+                timeout: VALIDATE_TIMEOUT_MS  // LLM calls can take a while; configurable via SOULFIELD_VALIDATE_TIMEOUT_MS
             });
 
             return jsonResponse(result);
