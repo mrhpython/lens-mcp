@@ -131,10 +131,10 @@ server.registerTool(
     "validate_content",
     {
         title: "Validate Content",
-        description: "Run multi-dimensional validation on AI-generated content. Returns pass/fail, score (0-100), per-dimension results, and violation details. Requires SOULFIELD_API_KEY. Supports domains: general, finance, marketing, legal.",
+        description: "Run multi-dimensional validation on AI-generated content. Returns pass/fail, score (0-100), per-dimension results, and violation details. Requires SOULFIELD_API_KEY. Supports domains: general, finance, marketing, legal, seo, agency.",
         inputSchema: {
             text: z.string().describe("The AI-generated content to validate"),
-            domain: z.enum(["general", "finance", "marketing", "legal"]).optional().describe("Domain context for validation (default: general)"),
+            domain: z.enum(["general", "finance", "marketing", "legal", "seo", "agency"]).optional().describe("Domain context for validation (default: general)"),
             context: z.string().optional().describe("Audience/purpose context for Relevance lens (Lens 9). Omit to skip Relevance silently.")
         }
     },
