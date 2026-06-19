@@ -27,6 +27,15 @@ const { z } = require("zod/v3");
 const API_BASE = process.env.SOULFIELD_API_BASE || "http://localhost:8002";
 const API_KEY = process.env.SOULFIELD_API_KEY || "";
 const VALIDATE_TIMEOUT_MS = parseInt(process.env.SOULFIELD_VALIDATE_TIMEOUT_MS || "180000", 10);
+// Long-input async submit+poll (2026-06-19): inputs >= ASYNC_MIN_CHARS are
+// submitted as a pro-async job and polled to completion, so a single request
+// never hits VALIDATE_TIMEOUT_MS (the 180s ceiling). Short inputs keep the
+// fast sync path. VALIDATE_BUDGET_MS bounds total wall-clock for the poll loop.
+const VALIDATE_BUDGET_MS = parseInt(process.env.SOULFIELD_VALIDATE_BUDGET_MS || "600000", 10);
+const POLL_TIMEOUT_MS = parseInt(process.env.SOULFIELD_POLL_TIMEOUT_MS || "30000", 10);
+const ASYNC_MIN_CHARS = parseInt(process.env.SOULFIELD_ASYNC_MIN_CHARS || "4000", 10);
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Create MCP Server
 const server = new McpServer({
@@ -120,6 +129,40 @@ function apiRequest(method, path, body, options = {}) {
     });
 }
 
+/**
+ * Poll a pro/premium async validation job to completion.
+ * Returns the completed ValidateResponse, or throws on failed/expired/budget.
+ * Each GET is short (POLL_TIMEOUT_MS); the loop is bounded by budgetMs total.
+ */
+async function pollJob(jobId, budgetMs) {
+    const start = Date.now();
+    let delay = 2000;
+    while (Date.now() - start < budgetMs) {
+        await sleep(delay);
+        let job;
+        try {
+            job = await apiRequest("GET", `/v1/validate/${jobId}`, null, {
+                apiKey: API_KEY,
+                timeout: POLL_TIMEOUT_MS
+            });
+        } catch (e) {
+            // 404 = job evicted/expired → terminal; otherwise transient (slow
+            // poll, 5xx) → keep trying within the budget.
+            if (e.statusCode === 404) {
+                throw new Error(`Validation job ${jobId} not found (expired)`);
+            }
+            delay = Math.min(delay * 1.5, 15000);
+            continue;
+        }
+        if (job.status === "complete") return job;
+        if (job.status === "failed") {
+            throw new Error(`Validation job ${jobId} failed${job.error ? ": " + job.error : ""}`);
+        }
+        delay = Math.min(delay * 1.5, 15000);  // pending → backoff
+    }
+    throw new Error(`Validation exceeded total budget of ${budgetMs}ms (job ${jobId})`);
+}
+
 // --- Tools ---
 
 /**
@@ -150,12 +193,46 @@ server.registerTool(
             if (domain) payload.domain = domain;
             if (context) payload.context = context;
 
-            const result = await apiRequest("POST", "/v1/validate", payload, {
-                apiKey: API_KEY,
-                timeout: VALIDATE_TIMEOUT_MS  // LLM calls can take a while; configurable via SOULFIELD_VALIDATE_TIMEOUT_MS
-            });
+            // Short inputs: fast single sync request (unchanged behavior).
+            if (text.length < ASYNC_MIN_CHARS) {
+                const result = await apiRequest("POST", "/v1/validate", payload, {
+                    apiKey: API_KEY,
+                    timeout: VALIDATE_TIMEOUT_MS
+                });
+                return jsonResponse(result);
+            }
 
-            return jsonResponse(result);
+            // Long inputs: submit a pro-async job + poll to completion so a
+            // single request never hits VALIDATE_TIMEOUT_MS (the 180s ceiling).
+            let submit;
+            try {
+                submit = await apiRequest("POST", "/v1/validate", { ...payload, options: { async: true } }, {
+                    apiKey: API_KEY,
+                    timeout: VALIDATE_TIMEOUT_MS
+                });
+            } catch (e) {
+                // Older server without the async flag (400/422/404) → one sync
+                // attempt with the full budget as the per-request timeout.
+                if (e.statusCode === 400 || e.statusCode === 422 || e.statusCode === 404) {
+                    const result = await apiRequest("POST", "/v1/validate", payload, {
+                        apiKey: API_KEY,
+                        timeout: VALIDATE_BUDGET_MS
+                    });
+                    return jsonResponse(result);
+                }
+                throw e;  // 401 / 429 / other → outer catch
+            }
+
+            // Old server may ignore the flag and return a sync result.
+            if (submit && submit.status === "complete") {
+                return jsonResponse(submit);
+            }
+            if (submit && submit.status === "pending" && submit.id) {
+                const result = await pollJob(submit.id, VALIDATE_BUDGET_MS);
+                return jsonResponse(result);
+            }
+            // Unexpected shape — surface it rather than silently pass.
+            return jsonResponse(submit);
         } catch (error) {
             // Provide actionable error messages for common failures
             if (error.statusCode === 401) {
