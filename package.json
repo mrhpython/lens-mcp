@@ -7,8 +7,9 @@
   "author": "Soulfield <hello@soulfield.one>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/soulfield/lens-mcp"
+    "url": "https://github.com/mrhpython/lens-mcp"
   },
+  "homepage": "https://api.soulfield.one/developers",
   "keywords": [
     "mcp",
     "ai-validation",
@@ -21,7 +22,8 @@
   "files": [
     "mcp-server.cjs",
     "package.json",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "bin": {
     "soulfield-lens-mcp": "mcp-server.cjs"
