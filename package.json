@@ -7,7 +7,7 @@
   "author": "Soulfield <hello@soulfield.one>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mrhpython/lens-mcp"
+    "url": "git+https://github.com/mrhpython/lens-mcp.git"
   },
   "homepage": "https://api.soulfield.one/developers",
   "keywords": [
