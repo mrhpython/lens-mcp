@@ -1,0 +1,22 @@
+# Smithery configuration — https://smithery.ai/docs/config#smitheryyaml
+# stdio server: thin wrapper around the hosted Lens API. Starts keyless
+# (lens_health needs no key); validate_content / scrub_pii need SOULFIELD_API_KEY.
+startCommand:
+  type: stdio
+  configSchema:
+    # JSON Schema defining the configuration options for the MCP.
+    type: object
+    required: []
+    properties:
+      soulfieldApiKey:
+        type: string
+        title: Soulfield API Key
+        description: API key for validate_content and scrub_pii. Request one at hello@soulfield.one. lens_health works without one.
+      soulfieldApiBase:
+        type: string
+        default: https://api.soulfield.one
+        description: Lens API base URL.
+  commandFunction:
+    # A function that produces the CLI command to start the MCP on stdio.
+    |-
+    (config) => ({ command: 'node', args: ['mcp-server.cjs'], env: { SOULFIELD_API_BASE: config.soulfieldApiBase || 'https://api.soulfield.one', SOULFIELD_API_KEY: config.soulfieldApiKey || '' } })

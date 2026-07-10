@@ -1,0 +1,33 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.mrhpython/lens-mcp",
+  "description": "Outside-in validation gate for AI-generated text; a separate model checks LLM output, fail-closed.",
+  "repository": {
+    "url": "https://github.com/mrhpython/lens-mcp",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@soulfield/lens-mcp",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "SOULFIELD_API_BASE",
+          "description": "Lens API base URL. Use https://api.soulfield.one for the hosted service.",
+          "default": "https://api.soulfield.one"
+        },
+        {
+          "name": "SOULFIELD_API_KEY",
+          "description": "API key for validate_content and scrub_pii. Request at hello@soulfield.one. lens_health needs no key.",
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
