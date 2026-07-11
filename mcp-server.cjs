@@ -252,14 +252,15 @@ server.registerTool(
 
 /**
  * Tool: scrub_pii
- * PII-only scan using regex — instant, no LLM. Requires API key.
- * Calls POST /v1/scrub.
+ * Server-side pattern scan for structured PII/secrets — no LLM. Requires API key.
+ * This wrapper forwards the text to the hosted API's POST /v1/scrub; the
+ * pattern matching runs there, not in this package.
  */
 server.registerTool(
     "scrub_pii",
     {
         title: "Scrub PII",
-        description: "Scan text for PII (emails, phone numbers, SSNs, credit cards, etc.) using regex. Returns scrubbed text with PII replaced by type markers, plus a list of findings. Instant — no LLM call. Requires SOULFIELD_API_KEY.",
+        description: "Scan text for structured PII and secrets (emails, UK/US phone numbers, credit-card numbers, US SSNs, UK NI/UTR numbers, database connection strings, and common API-key/credential patterns) via the hosted Lens API. Returns scrubbed text with each match replaced by a type marker, plus a findings list. Pattern-based server-side scan, no LLM call. Targets structured identifiers — it does not detect personal names or free-form PII, and coverage of structured formats is best-effort, not exhaustive. Requires SOULFIELD_API_KEY.",
         inputSchema: {
             text: z.string().describe("The text to scan for PII")
         }
@@ -268,7 +269,7 @@ server.registerTool(
         try {
             const result = await apiRequest("POST", "/v1/scrub", { text }, {
                 apiKey: API_KEY,
-                timeout: 10000  // Regex-only, should be fast
+                timeout: 10000  // Pattern scan server-side, no LLM — should be fast
             });
 
             return jsonResponse(result);

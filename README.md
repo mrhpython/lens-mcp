@@ -59,7 +59,7 @@ Production calls need an API key — request one at [hello@soulfield.one](mailto
 | Tool | What it does | Auth |
 |---|---|---|
 | `validate_content` | Runs the outside-in gate over text. Returns pass/fail, score, per-dimension results, and violation details with reasoning. Optional `domain` (general, finance, marketing, legal, seo, agency) and `context` (audience/purpose). | key |
-| `scrub_pii` | Regex-only PII scan (emails, phone numbers, card numbers, …). Returns scrubbed text plus findings. Instant — no LLM call. | key |
+| `scrub_pii` | Server-side scan for structured PII and secrets — emails, UK/US phone numbers, credit-card numbers, US SSNs, UK NI/UTR numbers, database connection strings, and common API-key/credential patterns. Returns scrubbed text (each match replaced by a type marker) plus findings. Pattern-based, no LLM call. Targets structured identifiers — it does not detect personal names or free-form PII, and structured-format coverage is best-effort, not exhaustive. | key |
 | `lens_health` | Checks the Lens API is up. Returns status and version. | none |
 
 **What you get per run:** receipts — what was checked, what passed, what was held, and why. Machine-readable, not a badge. We won't hand you a guaranteed accuracy number for your data: scores don't transfer across models, datasets, and runtimes, and a tool that promises a fixed figure on data it has never seen is making the exact claim this gate exists to catch.
