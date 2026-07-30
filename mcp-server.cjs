@@ -5,12 +5,23 @@
  * Exposes Soulfield Lens validation as MCP tools for Claude Code,
  * Cursor, and other MCP-compatible agents.
  *
- * Tools:
+ * Two tiers, on purpose:
+ *
+ * A. Gate tier — wraps HTTP calls to http://localhost:8002/v1/*
  *   - validate_content: Multi-dimensional validation of AI-generated content
- *   - scrub_pii: PII-only scan using regex (instant, no LLM)
+ *   - scrub_pii: PII-only pattern scan (no LLM)
  *   - lens_health: Check if Lens API service is running
  *
- * Wraps HTTP calls to http://localhost:8002/v1/*
+ * B. Validator tier — shells out to the local `lens-kit` CLI. These take LOCAL
+ *    FILE PATHS and are stdio-only by design (see the boundary note below).
+ *   - lens_catches_relevant / lens_catches_add / lens_catches_stats
+ *   - lens_consistency_leaks / lens_consistency_numbers / lens_consistency_markers
+ *
+ * Why both: the gate is substrate-blind by construction — it judges one text and
+ * has no tools, which is exactly what makes it an independent check. Tier B is
+ * the half that can see the disk: deterministic cross-file checks and the
+ * institutional defect memory. Neither replaces the other; the agent supplies
+ * substrate evidence, the gate owns the score.
  */
 
 // CRITICAL: Redirect all console.log to stderr BEFORE any imports
@@ -306,12 +317,238 @@ server.registerTool(
     }
 );
 
+// --- Kit CLI tools (local-only by design) ---
+//
+// The six tools below shell out to the installed `lens-kit` CLI instead of the
+// hosted API, because they take LOCAL FILE PATHS. That is deliberate and it is a
+// hard boundary: `consistency leaks|markers|numbers` read arbitrary paths off the
+// caller's disk, so exposing them over a hosted HTTP endpoint would be a
+// file-disclosure vector, not a feature. On a stdio server the paths are the
+// caller's own machine, so the capability is safe here and ONLY here. Do not
+// port these to lens-api or to lens-kit/serve.
+//
+// They exist because the gate is substrate-blind by construction (no tools, no
+// file access — that is what keeps it an independent check). The cross-file
+// defects it cannot see (a summary number the body never states, a marker
+// dropped between formats, a leaked deny term) are caught here, deterministically
+// and with no LLM call. Together they are the validator-agent tier; see
+// docs/VALIDATOR-AGENT.md in lens-kit.
+
+const KIT_BIN = process.env.LENS_KIT_BIN || "lens-kit";
+const KIT_TIMEOUT_MS = parseInt(process.env.LENS_KIT_TIMEOUT_MS || "120000", 10);
+
+/**
+ * Run the lens-kit CLI. Uses spawn with an ARGV ARRAY and no shell, so file
+ * paths and deny terms cannot be command-injected.
+ *
+ * Exit codes are load-bearing and are surfaced verbatim: 0 = clean,
+ * 6 = consistency violation (a violation no score overrides), 2 = usage/config
+ * error, 127 = CLI not installed. Anything non-zero that is not 6 is an ERROR,
+ * never a pass — the caller must fail closed.
+ */
+function runKit(args, cwd) {
+    return new Promise((resolve) => {
+        const { spawn } = require("child_process");
+        let child;
+        try {
+            child = spawn(KIT_BIN, args, {
+                cwd: cwd || process.cwd(),
+                shell: false,
+                stdio: ["ignore", "pipe", "pipe"]
+            });
+        } catch (e) {
+            return resolve({ spawn_error: e.message, exit_code: null });
+        }
+        let stdout = "", stderr = "", timedOut = false;
+        const timer = setTimeout(() => {
+            timedOut = true;
+            child.kill("SIGKILL");
+        }, KIT_TIMEOUT_MS);
+        child.stdout.on("data", (d) => { stdout += d; });
+        child.stderr.on("data", (d) => { stderr += d; });
+        child.on("error", (e) => {
+            clearTimeout(timer);
+            resolve({ spawn_error: e.message, exit_code: null });
+        });
+        child.on("close", (code) => {
+            clearTimeout(timer);
+            resolve({
+                exit_code: code,
+                stdout: stdout.trim(),
+                stderr: stderr.trim(),
+                timed_out: timedOut
+            });
+        });
+    });
+}
+
+/**
+ * Normalize a runKit result into an MCP response with an explicit verdict.
+ * Fails CLOSED: a missing CLI, a timeout or an unexpected exit code is an
+ * error, never a silent pass.
+ */
+function kitResponse(toolName, res, { violationCode = null } = {}) {
+    if (res.spawn_error) {
+        const hint = /ENOENT/.test(res.spawn_error)
+            ? `lens-kit not found (tried "${KIT_BIN}"). Install it (pip install lens_kit) or set LENS_KIT_BIN to its path. Verdict is UNKNOWN — do not treat this as a pass.`
+            : `${res.spawn_error} — verdict is UNKNOWN, do not treat this as a pass.`;
+        return jsonError(toolName, new Error(hint));
+    }
+    if (res.timed_out) {
+        return jsonError(toolName, new Error(
+            `lens-kit timed out after ${KIT_TIMEOUT_MS}ms. Verdict is UNKNOWN — do not treat this as a pass.`
+        ));
+    }
+    if (violationCode !== null && res.exit_code === violationCode) {
+        return jsonResponse({
+            verdict: "VIOLATION",
+            exit_code: res.exit_code,
+            note: "A consistency violation is authoritative — no gate score overrides it.",
+            output: res.stdout,
+            stderr: res.stderr || undefined
+        });
+    }
+    if (res.exit_code === 0) {
+        return jsonResponse({
+            verdict: violationCode !== null ? "CLEAN" : "OK",
+            exit_code: 0,
+            output: res.stdout,
+            stderr: res.stderr || undefined
+        });
+    }
+    return jsonError(toolName, new Error(
+        `lens-kit exited ${res.exit_code} (usage/config error, not a verdict). Verdict is UNKNOWN. stderr: ${res.stderr || "(none)"}`
+    ));
+}
+
+const cwdArg = z.string().optional().describe(
+    "Working directory to run in. catches.jsonl is read from and written to here. Defaults to the server's cwd."
+);
+
+server.registerTool(
+    "lens_catches_relevant",
+    {
+        title: "Prior Catches (institutional defect memory)",
+        description: "Read the defect bank BEFORE validating: prior named defects for an artifact type, most-recurrent patterns first. This is the institutional memory that makes the gate improve over time — the recurring traps tell you where this class of artifact has failed before. Any pattern at threshold is marked [PROMOTE], meaning it recurs often enough to deserve a deterministic check. Runs the local lens-kit CLI, no LLM call. Omit artifact_type and pass all=true when the type has no history yet.",
+        inputSchema: {
+            artifact_type: z.string().optional().describe("Artifact type to filter by, e.g. landing-copy, research-brief, content-pack"),
+            domain: z.string().optional().describe("Also filter by domain, e.g. marketing, finance, agency"),
+            all: z.boolean().optional().describe("Surface every catch regardless of artifact type"),
+            threshold: z.number().int().optional().describe("Recurrence threshold for [PROMOTE] lines (default 3)"),
+            format: z.enum(["block", "json"]).optional().describe("block = paste-ready surface (default); json = raw records"),
+            cwd: cwdArg
+        }
+    },
+    async ({ artifact_type, domain, all, threshold, format, cwd }) => {
+        const args = ["catches", "relevant"];
+        if (artifact_type) args.push(artifact_type);
+        if (all) args.push("--all");
+        if (domain) args.push("--domain", domain);
+        if (threshold !== undefined) args.push("--threshold", String(threshold));
+        if (format) args.push("--format", format);
+        return kitResponse("lens_catches_relevant", await runKit(args, cwd));
+    }
+);
+
+server.registerTool(
+    "lens_catches_add",
+    {
+        title: "Record a Catch (append to defect memory)",
+        description: "Append a NAMED DEFECT to the defect bank so it is caught next time. Record what was WRONG, the general pattern it is an instance of, and the forward rule that prevents it — doctrine REJECTS routine passes, so only log actual defects. Set self_catch=true when the defect was a failure of your own validation discipline. This is the write half of the improvement loop: enough recurrences of a pattern promote it to a deterministic check.",
+        inputSchema: {
+            catch: z.string().describe("What was WRONG (the specific defect found)"),
+            pattern: z.string().describe("The general trap this is an instance of"),
+            rule: z.string().describe("The forward rule that prevents this next time"),
+            artifact_type: z.string().describe("Artifact type, e.g. landing-copy, research-brief"),
+            domain: z.string().describe("Domain, e.g. marketing, finance, agency"),
+            self_catch: z.boolean().optional().describe("True if this was a failure of the validator's own discipline"),
+            cwd: cwdArg
+        }
+    },
+    async ({ catch: catchText, pattern, rule, artifact_type, domain, self_catch, cwd }) => {
+        const args = ["catches", "add",
+            "--catch", catchText,
+            "--pattern", pattern,
+            "--rule", rule,
+            "--artifact-type", artifact_type,
+            "--domain", domain];
+        if (self_catch) args.push("--self-catch");
+        return kitResponse("lens_catches_add", await runKit(args, cwd));
+    }
+);
+
+server.registerTool(
+    "lens_catches_stats",
+    {
+        title: "Catch Recurrence Stats",
+        description: "Per-pattern recurrence counts across the defect bank. Any pattern at or above the threshold gets a PROMOTE-to-deterministic-check suggestion — that is the signal a recurring judgment call should become a cheap fixed check instead. Use this to decide what to harden next.",
+        inputSchema: { cwd: cwdArg }
+    },
+    async ({ cwd }) => kitResponse("lens_catches_stats", await runKit(["catches", "stats"], cwd))
+);
+
+server.registerTool(
+    "lens_consistency_leaks",
+    {
+        title: "Forbidden-String Leak Scan",
+        description: "Scan customer-facing files for deny-list terms (case-insensitive literal match). Deterministic, no LLM. A hit is a VIOLATION that no gate score overrides — exit 6. Run this on EVERY customer-facing file before any irreversible publish: it is the check that catches a real client name, an internal codename or a banned absolute surviving into shipped copy. A credential scanner will not find these, because nothing here is a credential.",
+        inputSchema: {
+            files: z.array(z.string()).min(1).describe("Local file path(s) to scan"),
+            deny: z.array(z.string()).optional().describe("Extra deny terms, added to the profile's consistency.deny"),
+            profile: z.string().optional().describe("Profile YAML providing consistency.deny"),
+            cwd: cwdArg
+        }
+    },
+    async ({ files, deny, profile, cwd }) => {
+        const args = ["consistency", "leaks", ...files];
+        if (profile) args.push("--profile", profile);
+        if (deny && deny.length) args.push("--deny", ...deny);
+        return kitResponse("lens_consistency_leaks", await runKit(args, cwd), { violationCode: 6 });
+    }
+);
+
+server.registerTool(
+    "lens_consistency_numbers",
+    {
+        title: "Number Parity (summary vs body)",
+        description: "Check that every numeric literal in a summary actually appears in the body it summarizes. Deterministic, no LLM, exit 6 on a violation. Catches the invented figure — the number a summary asserts that its source never stated. TRIPWIRE, not an oracle: literal matching only, no semantic or derived arithmetic, so a legitimately computed total will flag. Review a hit, do not auto-trust it.",
+        inputSchema: {
+            summary: z.string().describe("The summary file (its numbers must appear in the body)"),
+            body: z.string().describe("The body file the summary summarizes"),
+            cwd: cwdArg
+        }
+    },
+    async ({ summary, body, cwd }) =>
+        kitResponse("lens_consistency_numbers", await runKit(["consistency", "numbers", summary, body], cwd), { violationCode: 6 })
+);
+
+server.registerTool(
+    "lens_consistency_markers",
+    {
+        title: "Marker Parity (source vs rendered)",
+        description: "Check that evidence markers counted in a source artifact survive into every rendered output. Deterministic, no LLM, exit 6 on a violation. Catches the caveat, citation or hedge that gets dropped between formats — the source says 'as-of 2026-04' and the rendered deck quietly does not. TRIPWIRE: a deliberate subset render under-counts legitimately, so review a hit rather than trusting it blindly.",
+        inputSchema: {
+            source: z.string().describe("The source artifact (authoritative marker counts)"),
+            rendered: z.array(z.string()).min(1).describe("Rendered output file(s) to check against the source"),
+            markers: z.array(z.string()).optional().describe("Explicit marker strings (otherwise taken from the profile)"),
+            profile: z.string().optional().describe("Profile YAML providing the marker set"),
+            cwd: cwdArg
+        }
+    },
+    async ({ source, rendered, markers, profile, cwd }) => {
+        const args = ["consistency", "markers", source, ...rendered];
+        if (profile) args.push("--profile", profile);
+        if (markers && markers.length) args.push("--markers", ...markers);
+        return kitResponse("lens_consistency_markers", await runKit(args, cwd), { violationCode: 6 });
+    }
+);
+
 // --- Main ---
 
 async function main() {
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error("Soulfield Lens MCP Server running on stdio (3 tools available)");
+    console.error("Soulfield Lens MCP Server running on stdio (9 tools available)");
     if (!API_KEY) {
         console.error("WARNING: SOULFIELD_API_KEY not set — validate_content will fail");
     }
