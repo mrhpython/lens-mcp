@@ -51,7 +51,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Create MCP Server
 const server = new McpServer({
     name: "soulfield-lens",
-    version: "1.0.0"
+    version: "1.1.0"
 });
 
 // --- Helpers ---
@@ -81,7 +81,7 @@ function apiRequest(method, path, body, options = {}) {
 
         const headers = {
             "Accept": "application/json",
-            "User-Agent": "soulfield-lens-mcp/1.0.0"
+            "User-Agent": "soulfield-lens-mcp/1.1.0"
         };
 
         if (body) {
