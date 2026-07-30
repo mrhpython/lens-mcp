@@ -491,7 +491,7 @@ server.registerTool(
     "lens_consistency_leaks",
     {
         title: "Forbidden-String Leak Scan",
-        description: "Scan customer-facing files for deny-list terms (case-insensitive literal match). Deterministic, no LLM. A hit is a VIOLATION that no gate score overrides — exit 6. Run this on EVERY customer-facing file before any irreversible publish: it is the check that catches a real client name, an internal codename or a banned absolute surviving into shipped copy. A credential scanner will not find these, because nothing here is a credential.",
+        description: "Scan customer-facing files for deny-list terms (CASE-INSENSITIVE literal match — note lens_consistency_markers is case-SENSITIVE, they differ). Deterministic, no LLM. Exit 6 on a hit. Run this on EVERY customer-facing file before any irreversible publish: it is the check that catches a real client name, an internal codename or a banned absolute surviving into shipped copy. A credential scanner will not find these, because nothing here is a credential. IMPORTANT — a hit proves the STRING IS PRESENT, which is authoritative; it does not by itself prove a violation, because the match is NEGATION-BLIND: a banned phrase quoted in order to disclaim it ('we will not give you a guaranteed accuracy number') looks identical to the same phrase asserted. Adjudicate before acting. Deny terms should therefore be strings that are wrong in EVERY context (a real client name, an internal codename), not claims-you-do-not-make — those belong in a lens prompt.",
         inputSchema: {
             files: z.array(z.string()).min(1).describe("Local file path(s) to scan"),
             deny: z.array(z.string()).optional().describe("Extra deny terms, added to the profile's consistency.deny"),
@@ -526,7 +526,7 @@ server.registerTool(
     "lens_consistency_markers",
     {
         title: "Marker Parity (source vs rendered)",
-        description: "Check that evidence markers counted in a source artifact survive into every rendered output. Deterministic, no LLM, exit 6 on a violation. Catches the caveat, citation or hedge that gets dropped between formats — the source says 'as-of 2026-04' and the rendered deck quietly does not. TRIPWIRE: a deliberate subset render under-counts legitimately, so review a hit rather than trusting it blindly.",
+        description: "Check that evidence markers counted in a source artifact survive into every rendered output. Deterministic, no LLM, exit 6 on a violation. Catches the caveat, citation or hedge that gets dropped between formats — the source says 'as-of 2026-04' and the rendered deck quietly does not. Matching is CASE-SENSITIVE (unlike lens_consistency_leaks, which is case-insensitive), so pick markers whose casing is stable across source and render: 'TRIPWIRE' in the source will NOT match 'Tripwire' in the render and will read as dropped when nothing was. TRIPWIRE: a deliberate subset render also under-counts legitimately. Before treating a hit as a removed caveat, grep the rendered file case-insensitively.",
         inputSchema: {
             source: z.string().describe("The source artifact (authoritative marker counts)"),
             rendered: z.array(z.string()).min(1).describe("Rendered output file(s) to check against the source"),
