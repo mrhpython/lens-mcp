@@ -185,7 +185,7 @@ server.registerTool(
     "validate_content",
     {
         title: "Validate Content",
-        description: "Run multi-dimensional validation on AI-generated content. Returns pass/fail, score (0-100), per-dimension results, and violation details. Requires SOULFIELD_API_KEY. Supports domains: general, finance, marketing, legal, seo, agency.",
+        description: "Run the 10-lens validation gate on AI-generated content. Returns pass/fail, per-lens results, violation details, and a deterministic 0-10 score derived from violation counts (10 = clean, floors at 0; computed by the API tier layer, not by the LLM — the LLM-emitted 0-100 score was removed 2026-07-30). Requires SOULFIELD_API_KEY. Supports domains: general, finance, marketing, legal, seo, agency. WIRE CONTRACT (since 2026-08-10): each lens carries status (ran|skipped|error) and passed is null whenever no verdict was produced — parse passed===false as the violation signal, never !passed. HALT SEMANTICS: Rights runs first and halts the run on a critical violation; in a halted response downstream judged lenses read passed:null/status:skipped (unknown, not clean — consciousScan is non-blocking and keeps passed:true, its status:skipped is the never-ran signal).",
         inputSchema: {
             text: z.string().describe("The AI-generated content to validate"),
             domain: z.enum(["general", "finance", "marketing", "legal", "seo", "agency"]).optional().describe("Domain context for validation (default: general)"),
@@ -271,7 +271,7 @@ server.registerTool(
     "scrub_pii",
     {
         title: "Scrub PII",
-        description: "Scan text for structured PII and secrets (emails, UK/US phone numbers, credit-card numbers, US SSNs, UK NI/UTR numbers, database connection strings, and common API-key/credential patterns) via the hosted Lens API. Returns scrubbed text with each match replaced by a type marker, plus a findings list. Pattern-based server-side scan, no LLM call. Targets structured identifiers — it does not detect personal names or free-form PII, and coverage of structured formats is best-effort, not exhaustive. Requires SOULFIELD_API_KEY.",
+        description: "Scan text for structured PII and secrets (emails, UK/US phone numbers, credit-card numbers, US SSNs, UK NI/UTR numbers, database connection strings, and common API-key/credential patterns) via the hosted Lens API. Returns scrubbed text with each match replaced by a generic [REDACTED] marker (the finding TYPE — email, phone_uk, ni_number, etc. — appears only in the findings list, not in the replacement), plus that findings list. It scrubs structured identifiers only: personal NAMES survive, so scrubbed output is not anonymized. Pattern-based server-side scan, no LLM call. Targets structured identifiers — it does not detect personal names or free-form PII, and coverage of structured formats is best-effort, not exhaustive. Requires SOULFIELD_API_KEY.",
         inputSchema: {
             text: z.string().describe("The text to scan for PII")
         }
