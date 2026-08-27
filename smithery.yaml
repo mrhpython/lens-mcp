@@ -11,7 +11,7 @@ startCommand:
       soulfieldApiKey:
         type: string
         title: Soulfield API Key
-        description: API key for validate_content and scrub_pii. Request one at hello@soulfield.one. lens_health works without one.
+        description: API key for validate_content and scrub_pii. Get one free at https://api.soulfield.one/pricing#signup (one form, no card). lens_health works without one.
       soulfieldApiBase:
         type: string
         default: https://api.soulfield.one
