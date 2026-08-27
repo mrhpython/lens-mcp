@@ -24,7 +24,7 @@
         },
         {
           "name": "SOULFIELD_API_KEY",
-          "description": "API key for validate_content and scrub_pii. Request at hello@soulfield.one. lens_health needs no key.",
+          "description": "API key for validate_content and scrub_pii. Get one free, self-serve, no card, at https://api.soulfield.one/pricing#signup. lens_health needs no key.",
           "isSecret": true
         }
       ]
