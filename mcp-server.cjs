@@ -49,9 +49,17 @@ const ASYNC_MIN_CHARS = parseInt(process.env.SOULFIELD_ASYNC_MIN_CHARS || "4000"
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Create MCP Server
+// Version is read from package.json rather than hardcoded: it had drifted to
+// 1.1.0 while the package shipped 1.1.1, so introspection reported a version
+// that did not exist. package.json is in both the npm tarball and the image.
+let PKG_VERSION = "0.0.0";
+try {
+    PKG_VERSION = require("./package.json").version || PKG_VERSION;
+} catch (_) { /* keep the fallback; never fail startup over a version string */ }
+
 const server = new McpServer({
     name: "soulfield-lens",
-    version: "1.1.0"
+    version: PKG_VERSION
 });
 
 // --- Helpers ---
