@@ -53,17 +53,6 @@
       "required": false
     }
   },
-  "tools": [
-    { "name": "lens_health", "description": "Check whether the Lens API is reachable. Needs no key." },
-    { "name": "validate_content", "description": "Run the 10-lens gate over AI-generated text and return per-check findings." },
-    { "name": "scrub_pii", "description": "Deterministic personal-data pre-pass over text." },
-    { "name": "lens_catches_relevant", "description": "Surface previously recorded defect patterns relevant to the text at hand." },
-    { "name": "lens_catches_add", "description": "Record a defect pattern into the local catches bank." },
-    { "name": "lens_catches_stats", "description": "Per-pattern recurrence counts across the defect bank." },
-    { "name": "lens_consistency_leaks", "description": "Deterministic cross-file check for content that should not have travelled." },
-    { "name": "lens_consistency_numbers", "description": "Deterministic cross-file check for figures that disagree between documents." },
-    { "name": "lens_consistency_markers", "description": "Deterministic cross-file check for required markers that went missing." }
-  ],
   "compatibility": {
     "runtimes": {
       "node": ">=18.0.0"
