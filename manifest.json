@@ -1,0 +1,72 @@
+{
+  "manifest_version": "0.2",
+  "name": "lens-mcp",
+  "display_name": "Soulfield Lens",
+  "version": "1.1.1",
+  "description": "An independent review layer for AI-generated text: a 10-lens gate run by a separate model over output it did not write.",
+  "long_description": "Runs a fixed set of ten named checks over text a model produced, on a separate model from the one that wrote it, and returns the flagged line and the reason for each check rather than a single opaque verdict. Any number it reports is derived mechanically from violation counts — the judging model never emits a grade. A check that cannot complete reports unknown rather than a pass, so silence is never read as approval.\n\nlens_health needs no key. validate_content and scrub_pii need a free key, self-serve at https://api.soulfield.one/pricing#signup.",
+  "author": {
+    "name": "Soulfield",
+    "url": "https://soulfield.one"
+  },
+  "homepage": "https://soulfield.one",
+  "documentation": "https://github.com/mrhpython/lens-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mrhpython/lens-mcp"
+  },
+  "license": "MIT",
+  "keywords": [
+    "validation",
+    "llm-evaluation",
+    "guardrails",
+    "hallucination-detection",
+    "content-review"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "mcp-server.cjs",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/mcp-server.cjs"
+      ],
+      "env": {
+        "SOULFIELD_API_BASE": "${user_config.api_base}",
+        "SOULFIELD_API_KEY": "${user_config.api_key}"
+      }
+    }
+  },
+  "user_config": {
+    "api_base": {
+      "type": "string",
+      "title": "Lens API base URL",
+      "description": "Leave as-is for the hosted service, or point at your own deployment.",
+      "default": "https://api.soulfield.one",
+      "required": false
+    },
+    "api_key": {
+      "type": "string",
+      "title": "Soulfield API key",
+      "description": "Needed for validate_content and scrub_pii. lens_health works without one. Get a free key, no card, at https://api.soulfield.one/pricing#signup",
+      "sensitive": true,
+      "required": false
+    }
+  },
+  "tools": [
+    { "name": "lens_health", "description": "Check whether the Lens API is reachable. Needs no key." },
+    { "name": "validate_content", "description": "Run the 10-lens gate over AI-generated text and return per-check findings." },
+    { "name": "scrub_pii", "description": "Deterministic personal-data pre-pass over text." },
+    { "name": "lens_catches_relevant", "description": "Surface previously recorded defect patterns relevant to the text at hand." },
+    { "name": "lens_catches_add", "description": "Record a defect pattern into the local catches bank." },
+    { "name": "lens_catches_stats", "description": "Per-pattern recurrence counts across the defect bank." },
+    { "name": "lens_consistency_leaks", "description": "Deterministic cross-file check for content that should not have travelled." },
+    { "name": "lens_consistency_numbers", "description": "Deterministic cross-file check for figures that disagree between documents." },
+    { "name": "lens_consistency_markers", "description": "Deterministic cross-file check for required markers that went missing." }
+  ],
+  "compatibility": {
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}
