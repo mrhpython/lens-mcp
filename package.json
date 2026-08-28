@@ -2,6 +2,9 @@
   "name": "@soulfield/lens-mcp",
   "mcpName": "io.github.mrhpython/lens-mcp",
   "version": "1.1.1",
+  "scripts": {
+    "build": "node --check mcp-server.cjs"
+  },
   "description": "MCP server for AI content validation — multi-dimensional quality checks for LLM output",
   "main": "mcp-server.cjs",
   "license": "MIT",
