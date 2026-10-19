@@ -12,8 +12,9 @@
  *   - scrub_pii: PII-only pattern scan (no LLM)
  *   - lens_health: Check if Lens API service is running
  *
- * B. Validator tier — shells out to the local `lens-kit` CLI. These take LOCAL
- *    FILE PATHS and are stdio-only by design (see the boundary note below).
+ * B. Local validator tier — orchestrates local evidence search and optional
+ *    `lens-kit` checks. These take LOCAL FILE PATHS and are stdio-only by design.
+ *   - validate_artifact: local evidence preflight + deterministic checks + API gate
  *   - lens_catches_relevant / lens_catches_add / lens_catches_stats
  *   - lens_consistency_leaks / lens_consistency_numbers / lens_consistency_markers
  *
@@ -34,6 +35,8 @@ const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio
 // Use Zod v3 compatibility path for MCP SDK compatibility
 // See: https://github.com/modelcontextprotocol/typescript-sdk/issues/906
 const { z } = require("zod/v3");
+const { validateArtifact } = require("./lib/artifact-validation.cjs");
+const { registerValidationJobs } = require("./lib/validation-jobs.cjs");
 
 const API_BASE = process.env.SOULFIELD_API_BASE || "http://localhost:8002";
 const API_KEY = process.env.SOULFIELD_API_KEY || "";
@@ -89,7 +92,7 @@ function apiRequest(method, path, body, options = {}) {
 
         const headers = {
             "Accept": "application/json",
-            "User-Agent": "soulfield-lens-mcp/1.1.0"
+            "User-Agent": "soulfield-lens-mcp/1.2.0"
         };
 
         if (body) {
@@ -184,6 +187,91 @@ async function pollJob(jobId, budgetMs) {
 
 // --- Tools ---
 
+registerValidationJobs(server, z, apiRequest, API_KEY, jsonResponse);
+
+/**
+ * Send exact artifact text through the API gate. Evidence and local file paths
+ * are deliberately not accepted here and are never added to the API payload.
+ */
+async function validateText(text, domain, context) {
+    if (!API_KEY) {
+        const error = new Error(
+            "SOULFIELD_API_KEY not set. Set it as an environment variable in your MCP server config."
+        );
+        error.code = "NO_API_KEY";
+        throw error;
+    }
+
+    const payload = { text };
+    if (domain) payload.domain = domain;
+    if (context) payload.context = context;
+
+    if (text.length < ASYNC_MIN_CHARS) {
+        return apiRequest("POST", "/v1/validate", payload, {
+            apiKey: API_KEY,
+            timeout: VALIDATE_TIMEOUT_MS
+        });
+    }
+
+    let submit;
+    try {
+        submit = await apiRequest("POST", "/v1/validate", { ...payload, options: { async: true } }, {
+            apiKey: API_KEY,
+            timeout: VALIDATE_TIMEOUT_MS
+        });
+    } catch (error) {
+        if (error.statusCode === 400 || error.statusCode === 422 || error.statusCode === 404) {
+            return apiRequest("POST", "/v1/validate", payload, {
+                apiKey: API_KEY,
+                timeout: VALIDATE_BUDGET_MS
+            });
+        }
+        throw error;
+    }
+
+    if (submit && submit.status === "complete") return submit;
+    if (submit && submit.status === "pending" && submit.id) {
+        return pollJob(submit.id, VALIDATE_BUDGET_MS);
+    }
+    return submit;
+}
+
+function validationErrorResponse(toolName, error) {
+    if (error.code === "NO_API_KEY") {
+        return jsonError(toolName, error);
+    }
+    if (error.statusCode === 401) {
+        return jsonError(toolName, new Error(
+            "Authentication failed (401). Check that SOULFIELD_API_KEY is valid."
+        ));
+    }
+    if (error.statusCode === 429) {
+        return jsonError(toolName, new Error(
+            "Rate limited (429). Wait a moment and try again, or upgrade your API tier."
+        ));
+    }
+    return jsonError(toolName, error);
+}
+
+function artifactErrorResponse(error) {
+    let message = error.message || String(error);
+    if (error.statusCode === 401) {
+        message = "Authentication failed (401). Check that SOULFIELD_API_KEY is valid.";
+    } else if (error.statusCode === 429) {
+        message = "Rate limited (429). Wait a moment and try again, or upgrade your API tier.";
+    }
+    console.error("[validate_artifact] error", error);
+    return {
+        ...jsonResponse({
+            validation_level: "unknown",
+            gate_status: "UNKNOWN",
+            full_validator_status: "UNKNOWN",
+            error: message
+        }),
+        isError: true
+    };
+}
+
 /**
  * Tool: validate_content
  * Multi-dimensional validation of AI-generated content.
@@ -202,69 +290,9 @@ server.registerTool(
     },
     async ({ text, domain, context }) => {
         try {
-            if (!API_KEY) {
-                return jsonError("validate_content", new Error(
-                    "SOULFIELD_API_KEY not set. Set it as an environment variable in your MCP server config."
-                ));
-            }
-
-            const payload = { text };
-            if (domain) payload.domain = domain;
-            if (context) payload.context = context;
-
-            // Short inputs: fast single sync request (unchanged behavior).
-            if (text.length < ASYNC_MIN_CHARS) {
-                const result = await apiRequest("POST", "/v1/validate", payload, {
-                    apiKey: API_KEY,
-                    timeout: VALIDATE_TIMEOUT_MS
-                });
-                return jsonResponse(result);
-            }
-
-            // Long inputs: submit a pro-async job + poll to completion so a
-            // single request never hits VALIDATE_TIMEOUT_MS (the 180s ceiling).
-            let submit;
-            try {
-                submit = await apiRequest("POST", "/v1/validate", { ...payload, options: { async: true } }, {
-                    apiKey: API_KEY,
-                    timeout: VALIDATE_TIMEOUT_MS
-                });
-            } catch (e) {
-                // Older server without the async flag (400/422/404) → one sync
-                // attempt with the full budget as the per-request timeout.
-                if (e.statusCode === 400 || e.statusCode === 422 || e.statusCode === 404) {
-                    const result = await apiRequest("POST", "/v1/validate", payload, {
-                        apiKey: API_KEY,
-                        timeout: VALIDATE_BUDGET_MS
-                    });
-                    return jsonResponse(result);
-                }
-                throw e;  // 401 / 429 / other → outer catch
-            }
-
-            // Old server may ignore the flag and return a sync result.
-            if (submit && submit.status === "complete") {
-                return jsonResponse(submit);
-            }
-            if (submit && submit.status === "pending" && submit.id) {
-                const result = await pollJob(submit.id, VALIDATE_BUDGET_MS);
-                return jsonResponse(result);
-            }
-            // Unexpected shape — surface it rather than silently pass.
-            return jsonResponse(submit);
+            return jsonResponse(await validateText(text, domain, context));
         } catch (error) {
-            // Provide actionable error messages for common failures
-            if (error.statusCode === 401) {
-                return jsonError("validate_content", new Error(
-                    "Authentication failed (401). Check that SOULFIELD_API_KEY is valid."
-                ));
-            }
-            if (error.statusCode === 429) {
-                return jsonError("validate_content", new Error(
-                    "Rate limited (429). Wait a moment and try again, or upgrade your API tier."
-                ));
-            }
-            return jsonError("validate_content", error);
+            return validationErrorResponse("validate_content", error);
         }
     }
 );
@@ -433,6 +461,137 @@ const cwdArg = z.string().optional().describe(
     "Working directory to run in. catches.jsonl is read from and written to here. Defaults to the server's cwd."
 );
 
+function artifactKitOutcome(res) {
+    if (res.spawn_error) {
+        return { status: "UNKNOWN", exit_code: null, error: res.spawn_error };
+    }
+    if (res.timed_out) {
+        return {
+            status: "UNKNOWN",
+            exit_code: res.exit_code,
+            error: `lens-kit timed out after ${KIT_TIMEOUT_MS}ms`
+        };
+    }
+    if (res.exit_code === 6) {
+        return {
+            status: "VIOLATION",
+            exit_code: 6,
+            output: res.stdout,
+            stderr: res.stderr || undefined
+        };
+    }
+    if (res.exit_code === 0) {
+        return {
+            status: "CLEAN",
+            exit_code: 0,
+            output: res.stdout,
+            stderr: res.stderr || undefined
+        };
+    }
+    return {
+        status: "UNKNOWN",
+        exit_code: res.exit_code,
+        error: `lens-kit exited ${res.exit_code}; this is a usage/config error, not a verdict`,
+        stderr: res.stderr || undefined
+    };
+}
+
+async function runArtifactConsistency(specification, cwd) {
+    const checks = [];
+
+    if (specification.leaks) {
+        const args = ["consistency", "leaks", ...specification.leaks.files];
+        if (specification.leaks.profile) args.push("--profile", specification.leaks.profile);
+        if (specification.leaks.deny && specification.leaks.deny.length) {
+            args.push("--deny", ...specification.leaks.deny);
+        }
+        checks.push(runKit(args, cwd).then((result) => ["leaks", artifactKitOutcome(result)]));
+    }
+
+    if (specification.numbers) {
+        const args = [
+            "consistency", "numbers",
+            specification.numbers.summary,
+            specification.numbers.body
+        ];
+        checks.push(runKit(args, cwd).then((result) => ["numbers", artifactKitOutcome(result)]));
+    }
+
+    if (specification.markers) {
+        const args = [
+            "consistency", "markers",
+            specification.markers.source,
+            ...specification.markers.rendered
+        ];
+        if (specification.markers.profile) args.push("--profile", specification.markers.profile);
+        if (specification.markers.markers && specification.markers.markers.length) {
+            args.push("--markers", ...specification.markers.markers);
+        }
+        checks.push(runKit(args, cwd).then((result) => ["markers", artifactKitOutcome(result)]));
+    }
+
+    return Object.fromEntries(await Promise.all(checks));
+}
+
+server.registerTool(
+    "validate_artifact",
+    {
+        title: "Validate Local Artifact",
+        description: "Local orchestration entry point: read one artifact, run bounded literal searches across explicitly permitted evidence roots, run requested lens-kit consistency checks, and send ONLY the artifact text to the independent API gate. Literal matches locate candidate evidence but do not prove semantic truth, so this tool returns gate-only, evidence-preflight+gate, FAIL on an authoritative consistency violation, UNKNOWN on incomplete evidence/check errors, or PENDING_AGENT_REVIEW. Only a separate validator agent with host file read/search may issue a full-validator verdict. Local stdio only; never expose this tool through the hosted API.",
+        inputSchema: {
+            artifact_path: z.string().min(1).describe("Local UTF-8 artifact file to validate"),
+            evidence_roots: z.array(z.string().min(1)).max(20).optional().describe("Explicitly permitted local files/directories searched for evidence. Required when evidence_queries are supplied."),
+            evidence_queries: z.array(z.object({
+                claim: z.string().min(1).describe("Stable claim identifier or short claim label"),
+                query: z.string().min(1).max(500).describe("Literal text to locate inside the evidence roots"),
+                case_sensitive: z.boolean().optional().describe("Default true; false performs a case-insensitive literal search")
+            })).max(50).optional().describe("Bounded literal searches. A match is a source location requiring validator review, not semantic proof."),
+            consistency: z.object({
+                leaks: z.object({
+                    files: z.array(z.string().min(1)).min(1),
+                    deny: z.array(z.string()).optional(),
+                    profile: z.string().optional()
+                }).optional(),
+                numbers: z.object({
+                    summary: z.string().min(1),
+                    body: z.string().min(1)
+                }).optional(),
+                markers: z.object({
+                    source: z.string().min(1),
+                    rendered: z.array(z.string().min(1)).min(1),
+                    markers: z.array(z.string()).optional(),
+                    profile: z.string().optional()
+                }).optional()
+            }).optional().describe("Optional local deterministic cross-file checks. Exit 6 is an authoritative violation."),
+            domain: z.enum(["general", "finance", "marketing", "legal", "seo", "agency"]).optional(),
+            context: z.string().optional().describe("Audience/purpose context for Relevance"),
+            cwd: cwdArg
+        }
+    },
+    async (input) => {
+        try {
+            const path = require("path");
+            const localBase = input.cwd ? path.resolve(input.cwd) : process.cwd();
+            const normalizedInput = {
+                ...input,
+                artifact_path: path.isAbsolute(input.artifact_path)
+                    ? input.artifact_path
+                    : path.resolve(localBase, input.artifact_path),
+                evidence_roots: (input.evidence_roots || []).map((root) =>
+                    path.isAbsolute(root) ? root : path.resolve(localBase, root)
+                )
+            };
+            const result = await validateArtifact(normalizedInput, {
+                validateGate: validateText,
+                runConsistency: runArtifactConsistency
+            });
+            return jsonResponse(result);
+        } catch (error) {
+            return artifactErrorResponse(error);
+        }
+    }
+);
+
 server.registerTool(
     "lens_catches_relevant",
     {
@@ -556,13 +715,21 @@ server.registerTool(
 async function main() {
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error("Soulfield Lens MCP Server running on stdio (9 tools available)");
+    console.error("Soulfield Lens MCP Server running on stdio (10 tools available)");
     if (!API_KEY) {
         console.error("WARNING: SOULFIELD_API_KEY not set — validate_content will fail");
     }
 }
 
-main().catch((error) => {
-    console.error("Fatal error in main():", error);
-    process.exit(1);
-});
+if (require.main === module) {
+    main().catch((error) => {
+        console.error("Fatal error in main():", error);
+        process.exit(1);
+    });
+}
+
+module.exports = {
+    artifactKitOutcome,
+    runArtifactConsistency,
+    validateText
+};

@@ -1,14 +1,22 @@
 # Soulfield Lens — MCP server
 
+Long jobs can use `validation_submit` followed by `validation_receipt` on a
+fresh MCP connection. Save the returned job ID with the candidate SHA-256 locally.
+Retrieve that ID after a polling timeout; do not submit the content again.
+Pending, failed, expired and incomplete jobs confer no clearance. An uncertain
+submission without a returned ID must not be automatically retried. The existing
+`validate_content` tool is unchanged. See `test/validation-jobs.test.cjs` for
+offline recovery and Rights-preservation fixtures.
+
 **Outside-in validation for AI-generated text, as an MCP tool.**
 
 Every AI tool asks the same model that wrote the answer whether it's any good. It says yes. The Soulfield Lens is outside-in: a **separate model** runs a **fixed gate** over your output. It checks text — it doesn't write it. This package puts that gate inside Claude Code, Cursor, and any other MCP-compatible agent, so output can be validated on the path where it's generated.
 
 The gate is **fail-closed**: a borderline case returns UNKNOWN, never a silent pass. There is no generation step, so it can't fabricate claims of its own — only check. It can still be wrong about a judgment; that is exactly why borderline cases return UNKNOWN instead of a confident yes.
 
-This is a thin stdio wrapper around the hosted Lens API (`api.soulfield.one`). No local model, no build step — one file, two dependencies.
+This is a local stdio boundary around the hosted Lens API (`api.soulfield.one`). It keeps repository access on the caller's machine and sends only the finished artifact text to the API gate.
 
-It exposes **two tiers**. The **gate tier** (3 tools) needs nothing but an API key. The **validator tier** (6 tools) is optional and only activates if you also have the `lens-kit` CLI installed locally — it runs deterministic cross-file checks and the defect memory that the single-document gate cannot see. Skip it and the gate tier works exactly as before.
+It exposes **two tiers**. The **gate tier** (3 tools) needs nothing but an API key. The **validator tier** (7 tools) adds one local orchestration entry point plus the optional `lens-kit` cross-file checks and defect memory that the single-document gate cannot see. Skip local evidence inputs and the gate tier works exactly as before.
 
 ## Try it before you install anything
 
@@ -66,9 +74,11 @@ Production calls need an API key — request one at [hello@soulfield.one](mailto
 | `scrub_pii` | Server-side scan for structured PII and secrets — emails, UK/US phone numbers, credit-card numbers, US SSNs, UK NI/UTR numbers, database connection strings, and common API-key/credential patterns. Returns scrubbed text (each match replaced by a type marker) plus findings. Pattern-based, no LLM call. Targets structured identifiers — it does not detect personal names or free-form PII, and structured-format coverage is best-effort, not exhaustive. | key |
 | `lens_health` | Checks the Lens API is up. Returns status and version. | none |
 
-### Validator tier — optional, requires the `lens-kit` CLI locally
+### Validator tier — local; consistency checks require `lens-kit`
 
 > **Version note:** the validator tier lands in **1.1.0**. If `npm view @soulfield/lens-mcp version` still reports `1.0.0`, the registry has not caught up with this repo yet and `npx @soulfield/lens-mcp` will give you the three gate-tier tools only. Install from source in the meantime.
+
+> **Artifact orchestration:** `validate_artifact` lands in **1.2.0**. Its bounded local evidence search is built into this MCP package. Requested consistency checks still require `lens-kit`.
 
 > **Side effect worth knowing:** every validator-tier call appends a row to `RUNS.md` in its working directory — that is the kit's run ledger, by design. The directory is the `cwd` argument, or the server's own cwd if you omit it, so pass `cwd` explicitly if you care where the ledger lives. Sensitive flag values are redacted in the row (`--deny <redacted>`), so deny terms do not land on disk.
 
@@ -78,6 +88,7 @@ Production calls need an API key — request one at [hello@soulfield.one](mailto
 
 | Tool | What it does | Exit semantics |
 |---|---|---|
+| `validate_artifact` | Reads one local artifact, searches only explicitly permitted evidence roots, runs requested consistency checks, and sends only the artifact text to the API gate. It labels the result `gate-only` or `evidence-preflight+gate`. A literal match is a source location, not proof; a separate validator agent must read and adjudicate it before issuing a full-validator verdict. | consistency violation → `FAIL`; incomplete evidence/check error → `UNKNOWN`; otherwise `PENDING_AGENT_REVIEW` |
 | `lens_consistency_leaks` | Scans files for deny-list terms (**case-insensitive** literal). Run on every customer-facing file before an irreversible publish: catches a real client name, an internal codename or a banned absolute surviving into shipped copy. A credential scanner will not find these, because nothing here is a credential. **Negation-blind:** a banned phrase quoted in order to disclaim it matches identically to the same phrase asserted. | hit proves the string is present — adjudicate the verdict |
 | `lens_consistency_numbers` | Checks every numeric literal in a summary actually appears in the body it summarizes. Catches the invented figure. **Tripwire:** literal matching only, no derived arithmetic, and a figure cited as *superseded* ("supersedes the ~471 estimate") flags exactly like a stale one. Review, don't auto-trust. | violation / clean |
 | `lens_consistency_markers` | Checks evidence markers in a source survive into every rendered output — the caveat or citation dropped between formats. **Case-SENSITIVE**, unlike `leaks` above: `TRIPWIRE` will not match `Tripwire` and reads as dropped when nothing was. **Tripwire:** a deliberate subset render also under-counts legitimately. | violation / clean |
@@ -88,6 +99,30 @@ Production calls need an API key — request one at [hello@soulfield.one](mailto
 | `lens_catches_stats` | Per-pattern recurrence counts with promote suggestions. Tells you what to harden next. | — |
 
 The two tiers are complementary, not alternatives. The gate has no tools and no file access — that is precisely what makes it an independent check, and it is also why it cannot see a contradiction spread across two files. The validator tier sees the disk; the gate owns the score. Pair them: gather substrate evidence with the local tools, hand the text to the gate, and never argue a gate FAIL into a PASS. Full protocol: [`docs/VALIDATOR-AGENT.md`](https://github.com/mrhpython/lens-kit/blob/main/docs/VALIDATOR-AGENT.md).
+
+### One local entry point
+
+`validate_artifact` makes the boundary explicit in one call:
+
+```json
+{
+  "artifact_path": "output/candidate.md",
+  "evidence_roots": ["reports", "output/proof"],
+  "evidence_queries": [
+    {
+      "claim": "measured-result",
+      "query": "113/113 rows scored",
+      "case_sensitive": true
+    }
+  ],
+  "domain": "agency",
+  "context": "Internal technical handoff"
+}
+```
+
+The response includes `evidence_scope`, `files_read`, `searches_and_commands`, `claims_verified`, and `claims_unverified`. `claims_verified` is deliberately empty: grep proves that text exists at a source location, not that the claim is true. The separate validator agent must read the located evidence, reason across the files, and attach the final full-validator receipt.
+
+Evidence file contents and local absolute paths are never added to the API request. Directory searches skip `.git`, `node_modules`, symlinks, and binary files and fail closed when configured safety limits are exceeded.
 
 **What you get per run:** receipts — what was checked, what passed, what was held, and why. Machine-readable, not a badge. We won't hand you a guaranteed accuracy number for your data: scores don't transfer across models, datasets, and runtimes, and a tool that promises a fixed figure on data it has never seen is making the exact claim this gate exists to catch.
 
