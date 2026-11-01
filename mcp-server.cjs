@@ -48,6 +48,30 @@ const VALIDATE_TIMEOUT_MS = parseInt(process.env.SOULFIELD_VALIDATE_TIMEOUT_MS |
 const VALIDATE_BUDGET_MS = parseInt(process.env.SOULFIELD_VALIDATE_BUDGET_MS || "600000", 10);
 const POLL_TIMEOUT_MS = parseInt(process.env.SOULFIELD_POLL_TIMEOUT_MS || "30000", 10);
 const ASYNC_MIN_CHARS = parseInt(process.env.SOULFIELD_ASYNC_MIN_CHARS || "4000", 10);
+// Receipt capture (self-improving loop plan 2026-11-01, section 5.3): when set,
+// every gate result is appended to <dir>/receipts.jsonl (hashes, verdicts and
+// short quotes only) and the PII-scrubbed text goes to <dir>/private/docs/,
+// which carries its own "*" .gitignore. Unset = no capture, as before.
+const RECEIPT_DIR = expandHome(process.env.LENS_RECEIPT_DIR || "");
+const RECEIPT_QUOTE_MAX = 300;
+// Joins the receipt's free-text fields for one /v1/scrub call. It is longer
+// than the scrubber's 20-character [REDACTED] look-around and is cut by blank
+// lines, so no PII pattern can match across two fields.
+const RECEIPT_FIELD_SEP = "\n\n----lens-receipt-field-boundary----\n\n";
+
+/**
+ * Expand a leading "~" or "~/" to the home directory. A path set in .env or
+ * .mcp.json inside quotes reaches us with the "~" unexpanded; without this it
+ * would become a literal "~" folder under the server's cwd.
+ */
+function expandHome(p) {
+    if (!p) return p;
+    const os = require("os");
+    const path = require("path");
+    if (p === "~") return os.homedir();
+    if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
+    return p;
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -187,13 +211,27 @@ async function pollJob(jobId, budgetMs) {
 
 // --- Tools ---
 
-registerValidationJobs(server, z, apiRequest, API_KEY, jsonResponse);
+registerValidationJobs(server, z, apiRequest, API_KEY, jsonResponse,
+    RECEIPT_DIR
+        ? (text, domain, context, result) =>
+            writeReceipt(RECEIPT_DIR, { text, domain, context, meta: { source: "validation_job" }, result })
+        : null);
 
 /**
  * Send exact artifact text through the API gate. Evidence and local file paths
  * are deliberately not accepted here and are never added to the API payload.
+ * `meta` ({source, artifact_type}) is local only: it labels the receipt and is
+ * never sent to the API.
  */
-async function validateText(text, domain, context) {
+async function validateText(text, domain, context, meta = {}) {
+    const result = await requestValidation(text, domain, context);
+    if (RECEIPT_DIR) {
+        await writeReceipt(RECEIPT_DIR, { text, domain, context, meta, result });
+    }
+    return result;
+}
+
+async function requestValidation(text, domain, context) {
     if (!API_KEY) {
         const error = new Error(
             "SOULFIELD_API_KEY not set. Set it as an environment variable in your MCP server config."
@@ -234,6 +272,153 @@ async function validateText(text, domain, context) {
         return pollJob(submit.id, VALIDATE_BUDGET_MS);
     }
     return submit;
+}
+
+/**
+ * Pull the receipt fields out of a gate response: per-lens verdicts and one
+ * finding per violation. Quotes are kept whole here so the scrub sees every
+ * email or phone number intact; writeReceipt caps them after the scrub.
+ */
+function receiptFindings(result) {
+    const perLens = {};
+    const findings = [];
+    const lenses = (result && result.lenses) || {};
+    for (const [lens, entry] of Object.entries(lenses)) {
+        if (!entry || typeof entry !== "object") continue;
+        perLens[lens] = {
+            passed: entry.passed === undefined ? null : entry.passed,
+            status: entry.status || null
+        };
+        for (const v of entry.violations || []) {
+            findings.push({
+                lens,
+                severity: v.severity || null,
+                issue: typeof v.issue === "string" ? v.issue : "",
+                quote: typeof v.quote === "string" ? v.quote : "",
+                quote_status: v.quote_status || null
+            });
+        }
+    }
+    return { perLens, findings };
+}
+
+/**
+ * Scrub several short strings with one POST /v1/scrub call. Returns the
+ * scrubbed strings in order, or null if the call fails or the joined reply
+ * does not split back into the same number of fields.
+ */
+async function scrubFields(fields) {
+    if (!fields.some((f) => f)) return fields.slice();
+    try {
+        const scrub = await apiRequest("POST", "/v1/scrub", { text: fields.join(RECEIPT_FIELD_SEP) }, {
+            apiKey: API_KEY,
+            timeout: 10000
+        });
+        if (typeof scrub.scrubbed_text !== "string") return null;
+        const parts = scrub.scrubbed_text.split(RECEIPT_FIELD_SEP);
+        return parts.length === fields.length ? parts : null;
+    } catch (error) {
+        console.error("[receipt] field scrub failed:", error.message || String(error));
+        return null;
+    }
+}
+
+/**
+ * Scrub the whole text and save it under <dir>/private/docs/<sha>.txt.
+ * Returns { docStatus, piiCount }. If the scrub fails the doc is NOT written,
+ * rather than saving unscrubbed text.
+ */
+async function saveScrubbedDoc(docsDir, sha, text) {
+    const fs = require("fs/promises");
+    const path = require("path");
+    try {
+        const scrub = await apiRequest("POST", "/v1/scrub", { text }, {
+            apiKey: API_KEY,
+            timeout: 10000
+        });
+        if (typeof scrub.scrubbed_text !== "string") {
+            throw new Error("scrub response has no scrubbed_text");
+        }
+        await fs.writeFile(path.join(docsDir, `${sha}.txt`), scrub.scrubbed_text,
+            { encoding: "utf8", mode: 0o600 });
+        return {
+            docStatus: "written",
+            piiCount: typeof scrub.pii_count === "number" ? scrub.pii_count : null
+        };
+    } catch (error) {
+        console.error("[receipt] scrub failed; doc not saved:", error.message || String(error));
+        return { docStatus: "not_written_scrub_failed", piiCount: null };
+    }
+}
+
+/**
+ * Append one receipt line and save the scrubbed text. Capture must never fail
+ * a validation, so every error is logged to stderr and swallowed. The text is
+ * scrubbed by the same POST /v1/scrub the scrub_pii tool uses. The free-text
+ * fields of the line (context, each issue and quote) are scrubbed too, in one
+ * more call that runs at the same time. If that call fails, those fields are
+ * written as null and findings_status says so. The scrub finds structured
+ * identifiers only (emails, phones, card numbers, keys); names survive it.
+ */
+async function writeReceipt(dir, { text, domain, context, meta, result }) {
+    if (!result || typeof result !== "object" || !result.lenses) return;
+    const fs = require("fs/promises");
+    const path = require("path");
+    const crypto = require("crypto");
+    try {
+        const sha = crypto.createHash("sha256").update(text, "utf8").digest("hex");
+        const privateDir = path.join(dir, "private");
+        const docsDir = path.join(privateDir, "docs");
+        await fs.mkdir(docsDir, { recursive: true, mode: 0o700 });
+        await fs.writeFile(path.join(privateDir, ".gitignore"), "*\n", { mode: 0o600 });
+
+        const { perLens, findings } = receiptFindings(result);
+        const fields = [context || "", ...findings.flatMap((f) => [f.issue, f.quote])];
+        const [doc, scrubbed] = await Promise.all([
+            saveScrubbedDoc(docsDir, sha, text),
+            scrubFields(fields)
+        ]);
+
+        let lineContext = null;
+        let findingsStatus = "scrubbed";
+        if (scrubbed) {
+            lineContext = scrubbed[0] || null;
+            findings.forEach((f, i) => {
+                f.issue = scrubbed[1 + 2 * i];
+                f.quote = scrubbed[2 + 2 * i].slice(0, RECEIPT_QUOTE_MAX);
+            });
+        } else {
+            findingsStatus = "text_dropped_scrub_failed";
+            for (const f of findings) {
+                f.issue = null;
+                f.quote = null;
+            }
+        }
+
+        const line = {
+            date: new Date().toISOString(),
+            text_sha256: sha,
+            text_length: text.length,
+            domain: domain || null,
+            context: lineContext,
+            source: (meta && meta.source) || "validate_content",
+            validation_id: result.id || null,
+            passed: result.passed === undefined ? null : result.passed,
+            halted: result.halted === undefined ? null : result.halted,
+            score: result.score === undefined ? null : result.score,
+            tier: result.tier || null,
+            per_lens: perLens,
+            findings,
+            findings_status: findingsStatus,
+            doc_status: doc.docStatus,
+            pii_count: doc.piiCount
+        };
+        if (meta && meta.artifact_type) line.artifact_type = meta.artifact_type;
+        await fs.appendFile(path.join(dir, "receipts.jsonl"), JSON.stringify(line) + "\n",
+            { encoding: "utf8", mode: 0o600 });
+    } catch (error) {
+        console.error("[receipt] write failed; validation result unaffected:", error.message || String(error));
+    }
 }
 
 function validationErrorResponse(toolName, error) {
@@ -285,12 +470,14 @@ server.registerTool(
         inputSchema: {
             text: z.string().describe("The AI-generated content to validate"),
             domain: z.enum(["general", "finance", "marketing", "legal", "seo", "agency"]).optional().describe("Domain context for validation (default: general)"),
-            context: z.string().optional().describe("Audience/purpose context for Relevance lens (Lens 9). Omit to skip Relevance silently.")
+            context: z.string().optional().describe("Audience/purpose context for Relevance lens (Lens 9). Omit to skip Relevance silently."),
+            artifact_type: z.string().optional().describe("Artifact type, e.g. landing-copy, outreach-email. Local only: it labels the saved receipt when LENS_RECEIPT_DIR is set and is never sent to the API.")
         }
     },
-    async ({ text, domain, context }) => {
+    async ({ text, domain, context, artifact_type }) => {
         try {
-            return jsonResponse(await validateText(text, domain, context));
+            return jsonResponse(await validateText(text, domain, context,
+                { source: "validate_content", artifact_type }));
         } catch (error) {
             return validationErrorResponse("validate_content", error);
         }
@@ -372,6 +559,25 @@ server.registerTool(
 
 const KIT_BIN = process.env.LENS_KIT_BIN || "lens-kit";
 const KIT_TIMEOUT_MS = parseInt(process.env.LENS_KIT_TIMEOUT_MS || "120000", 10);
+
+/**
+ * Default working directory for the three catches tools, so every catch lands
+ * in one catches.jsonl (plan section 5.4). LENS_CATCHES_DIR overrides it. If the
+ * directory does not exist (an npm or Docker install), fall back to the
+ * server's cwd as before. The consistency tools keep the server's cwd: their
+ * relative file paths are the caller's, not lens-kit's.
+ */
+function catchesCwd() {
+    const fs = require("fs");
+    const os = require("os");
+    const path = require("path");
+    const dir = expandHome(process.env.LENS_CATCHES_DIR)
+        || path.join(os.homedir(), "dev", "tools", "lens-kit");
+    try {
+        if (fs.statSync(dir).isDirectory()) return dir;
+    } catch (_) { /* missing: fall back below */ }
+    return process.cwd();
+}
 
 /**
  * Run the lens-kit CLI. Uses spawn with an ARGV ARRAY and no shell, so file
@@ -458,7 +664,11 @@ function kitResponse(toolName, res, { violationCode = null } = {}) {
 }
 
 const cwdArg = z.string().optional().describe(
-    "Working directory to run in. catches.jsonl is read from and written to here. Defaults to the server's cwd."
+    "Working directory to run in. Defaults to the server's cwd."
+);
+
+const catchesCwdArg = z.string().optional().describe(
+    "Working directory to run in. catches.jsonl is read from and written to here. Defaults to ~/dev/tools/lens-kit (or LENS_CATCHES_DIR), so all catches land in one file."
 );
 
 function artifactKitOutcome(res) {
@@ -582,7 +792,8 @@ server.registerTool(
                 )
             };
             const result = await validateArtifact(normalizedInput, {
-                validateGate: validateText,
+                validateGate: (text, domain, context) =>
+                    validateText(text, domain, context, { source: "validate_artifact" }),
                 runConsistency: runArtifactConsistency
             });
             return jsonResponse(result);
@@ -603,7 +814,7 @@ server.registerTool(
             all: z.boolean().optional().describe("Surface every catch regardless of artifact type"),
             threshold: z.number().int().optional().describe("Recurrence threshold for [PROMOTE] lines (default 3)"),
             format: z.enum(["block", "json"]).optional().describe("block = paste-ready surface (default); json = raw records"),
-            cwd: cwdArg
+            cwd: catchesCwdArg
         }
     },
     async ({ artifact_type, domain, all, threshold, format, cwd }) => {
@@ -613,7 +824,7 @@ server.registerTool(
         if (domain) args.push("--domain", domain);
         if (threshold !== undefined) args.push("--threshold", String(threshold));
         if (format) args.push("--format", format);
-        return kitResponse("lens_catches_relevant", await runKit(args, cwd));
+        return kitResponse("lens_catches_relevant", await runKit(args, cwd || catchesCwd()));
     }
 );
 
@@ -629,18 +840,38 @@ server.registerTool(
             artifact_type: z.string().describe("Artifact type, e.g. landing-copy, research-brief"),
             domain: z.string().describe("Domain, e.g. marketing, finance, agency"),
             self_catch: z.boolean().optional().describe("True if this was a failure of the validator's own discipline"),
-            cwd: cwdArg
+            snippet: z.string().optional().describe("The offending text, verbatim (a short fragment). With lenses_failed it makes the catch exportable as a training label."),
+            lenses_failed: z.array(z.string()).optional().describe("Canonical lens keys the snippet failed, e.g. [\"truth\", \"causality\"]. lens-kit rejects an unknown key."),
+            provenance: z.enum(["michael", "seat", "deterministic", "qwen"]).optional().describe("Who judged the lens label. Rows marked qwen are never exported as training labels."),
+            cwd: catchesCwdArg
         }
     },
-    async ({ catch: catchText, pattern, rule, artifact_type, domain, self_catch, cwd }) => {
-        const args = ["catches", "add",
-            "--catch", catchText,
-            "--pattern", pattern,
-            "--rule", rule,
-            "--artifact-type", artifact_type,
-            "--domain", domain];
-        if (self_catch) args.push("--self-catch");
-        return kitResponse("lens_catches_add", await runKit(args, cwd));
+    async ({ catch: catchText, pattern, rule, artifact_type, domain, self_catch, snippet, lenses_failed, provenance, cwd }) => {
+        // The record goes through lens-kit's --from-json path: one JSON file
+        // carries every field, so the snippet keeps its exact bytes and newlines
+        // and no text passes through argv. The file is private and removed after.
+        const record = { catch: catchText, pattern, rule, artifact_type, domain };
+        if (self_catch) record.self_catch = true;
+        if (snippet) record.snippet = snippet;
+        if (lenses_failed && lenses_failed.length) record.lenses_failed = lenses_failed;
+        if (provenance) record.provenance = provenance;
+        const fs = require("fs/promises");
+        const os = require("os");
+        const path = require("path");
+        let tmpDir;
+        try {
+            tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "lens-catch-"));
+            const jsonPath = path.join(tmpDir, "catch.json");
+            await fs.writeFile(jsonPath, JSON.stringify(record), { encoding: "utf8", mode: 0o600 });
+            const res = await runKit(["catches", "add", "--from-json", jsonPath], cwd || catchesCwd());
+            return kitResponse("lens_catches_add", res);
+        } catch (error) {
+            return jsonError("lens_catches_add", error);
+        } finally {
+            if (tmpDir) {
+                await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+            }
+        }
     }
 );
 
@@ -649,9 +880,9 @@ server.registerTool(
     {
         title: "Catch Recurrence Stats",
         description: "Per-pattern recurrence counts across the defect bank. Any pattern at or above the threshold gets a PROMOTE-to-deterministic-check suggestion — that is the signal a recurring judgment call should become a cheap fixed check instead. Use this to decide what to harden next.",
-        inputSchema: { cwd: cwdArg }
+        inputSchema: { cwd: catchesCwdArg }
     },
-    async ({ cwd }) => kitResponse("lens_catches_stats", await runKit(["catches", "stats"], cwd))
+    async ({ cwd }) => kitResponse("lens_catches_stats", await runKit(["catches", "stats"], cwd || catchesCwd()))
 );
 
 server.registerTool(
@@ -730,6 +961,9 @@ if (require.main === module) {
 
 module.exports = {
     artifactKitOutcome,
+    catchesCwd,
+    receiptFindings,
     runArtifactConsistency,
-    validateText
+    validateText,
+    writeReceipt
 };

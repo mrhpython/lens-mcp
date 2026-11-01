@@ -71,3 +71,41 @@ test("validate_artifact preserves a real lens-kit consistency violation over a p
     assert.equal(payload.consistency_status, "VIOLATION");
     assert.equal(payload.full_validator_status, "FAIL");
 });
+
+test("lens_catches_add writes snippet, lenses_failed and provenance through the real lens-kit", { skip: !enabled }, async (t) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "lens-kit-catches-"));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const repository = path.resolve(__dirname, "..");
+    const transport = new StdioClientTransport({
+        command: process.execPath,
+        args: [path.join(repository, "mcp-server.cjs")],
+        cwd: repository,
+        env: { LENS_KIT_BIN: process.env.LENS_KIT_BIN || "lens-kit", LENS_CATCHES_DIR: root },
+        stderr: "pipe"
+    });
+    const client = new Client({ name: "lens-kit-catches", version: "1.0.0" });
+    await client.connect(transport);
+    t.after(() => transport.close());
+
+    for (const provenance of ["michael", "qwen"]) {
+        const response = await client.callTool({
+            name: "lens_catches_add",
+            arguments: {
+                catch: `Uncited figure judged by ${provenance}`,
+                pattern: "uncited statistic",
+                rule: "cite every external number",
+                artifact_type: "landing-copy",
+                domain: "agency",
+                snippet: `47% of teams agree (${provenance}).`,
+                lenses_failed: ["truth"],
+                provenance
+            }
+        });
+        assert.equal(response.isError, undefined);
+    }
+    const rows = (await fs.readFile(path.join(root, "catches.jsonl"), "utf8"))
+        .trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(rows.map((r) => r.provenance), ["michael", "qwen"]);
+    assert.deepEqual(rows[0].lenses_failed, ["truth"]);
+    assert.equal(rows[0].snippet, "47% of teams agree (michael).");
+});

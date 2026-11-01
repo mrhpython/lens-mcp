@@ -141,6 +141,8 @@ Inputs of ~4,000 characters and up are submitted as an async job and polled to c
 | `SOULFIELD_ASYNC_MIN_CHARS` | `4000` | Input length at which the async path kicks in. |
 | `LENS_KIT_BIN` | `lens-kit` | Path to the `lens-kit` CLI for the validator tier. Only needed if it is not on `PATH`. |
 | `LENS_KIT_TIMEOUT_MS` | `120000` | Timeout for a validator-tier command. On timeout the verdict is UNKNOWN, never a pass. |
+| `LENS_CATCHES_DIR` | `~/dev/tools/lens-kit` | Default working directory for the three `lens_catches_*` tools, so every catch lands in one `catches.jsonl`. A leading `~` is expanded. Falls back to the server's cwd if the directory does not exist. A `cwd` argument still wins. Catches can hold verbatim snippets, so `catches.jsonl` must stay out of git; the lens-kit repo ignores it. |
+| `LENS_RECEIPT_DIR` | unset | When set, each gate result from `validate_content`, `validate_artifact` and a completed `validation_submit` job appends one line to `<dir>/receipts.jsonl` (text hash, domain, context, per-lens verdicts, findings with short quotes; no document text). A leading `~` is expanded. The text, scrubbed by `POST /v1/scrub`, goes to `<dir>/private/docs/<sha256>.txt`, and `<dir>/private/.gitignore` holds `*`. The line's context, issues and quotes are scrubbed by one more `/v1/scrub` call; quotes are cut to 300 characters after the scrub. If a scrub fails, that text is not saved (`doc_status` or `findings_status` says so). The scrub finds structured identifiers only; names survive it. A write failure never fails the validation. |
 
 ## The rest of the product
 

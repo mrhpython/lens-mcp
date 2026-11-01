@@ -48,3 +48,28 @@ test("Rights HALT and failed jobs remain literal API results", async () => {
         assert.deepEqual(await setup(async () => result).validation_receipt({ job_id: id }), result);
     }
 });
+test("onComplete fires once per submitted job, only when complete, and never changes the result", async () => {
+    const seen = [];
+    const receipt = { id, status: "complete", passed: true, lenses: { truth: { passed: true } } };
+    let calls = 0;
+    const request = async () => (++calls < 3 ? { id, status: "pending" } : receipt);
+    const tools = {};
+    registerValidationJobs({ registerTool(name, _, fn) { tools[name] = fn; } }, z,
+        request, "fixture-key", value => value,
+        async (...args) => { seen.push(args); throw new Error("hook failure is swallowed"); });
+    await tools.validation_submit({ text: "Frozen candidate", domain: "agency", context: "Email" });
+    await tools.validation_receipt({ job_id: id });
+    assert.equal(seen.length, 0);
+    assert.deepEqual(await tools.validation_receipt({ job_id: id }), receipt);
+    assert.deepEqual(await tools.validation_receipt({ job_id: id }), receipt);
+    assert.deepEqual(seen, [["Frozen candidate", "agency", "Email", receipt]]);
+    // A job this process did not submit has no text, so it gets no receipt.
+    const other = "87654321-1234-4234-8234-123456789abc";
+    const tools2 = {};
+    const seen2 = [];
+    registerValidationJobs({ registerTool(name, _, fn) { tools2[name] = fn; } }, z,
+        async () => ({ ...receipt, id: other }), "fixture-key", value => value,
+        async (...args) => { seen2.push(args); });
+    await tools2.validation_receipt({ job_id: other });
+    assert.equal(seen2.length, 0);
+});
