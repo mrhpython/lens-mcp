@@ -369,7 +369,11 @@ test("scrub calls send the user's own published details as the keep list", async
     await client.callTool({ name: "validate_content", arguments: { text: TEXT, domain: "agency" } });
     const scrubs = api.calls.filter((c) => c.path === "/v1/scrub");
     assert.ok(scrubs.length >= 2);
-    for (const call of scrubs) assert.deepEqual(call.body.keep, ["Jo Example", "jo@example.com"]);
+    // Only lines that occur in each call's own text are sent: TEXT holds the email, never the name.
+    for (const call of scrubs) {
+        assert.deepEqual(call.body.keep, call.body.text.includes("jo@example.com") ? ["jo@example.com"] : []);
+    }
+    assert.ok(scrubs.some((c) => c.body.keep.length === 1));
 });
 
 test("without an identity file the keep list is empty", async (t) => {

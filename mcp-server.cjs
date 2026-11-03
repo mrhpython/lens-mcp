@@ -78,16 +78,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /**
  * The user's own published details (name, postal address, contact email, phone), one per line, from
  * LENS_PUBLIC_IDENTITY_FILE or ~/.config/soulfield-lens/public-identity.txt ('#' comments, lines under
- * 3 characters skipped). Sent as /v1/scrub's "keep" list so they are not redacted: they belong in the
- * user's outgoing work. Anyone else's details still are. No file: [] (the default for a new user).
+ * 3 characters skipped). Only the lines that occur in `text` are returned, so nothing else leaves the
+ * machine. Sent as /v1/scrub's "keep" list so they are not redacted: they belong in the user's
+ * outgoing work. Anyone else's details still are. No file: [] (the default for a new user).
  * Read on every call, so an edit applies to the next scrub.
  */
-function ownIdentity() {
+function ownIdentity(text) {
     const fs = require("fs");
     const file = expandHome(process.env.LENS_PUBLIC_IDENTITY_FILE || "~/.config/soulfield-lens/public-identity.txt");
     try {
+        const flat = (s) => String(s).toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+        const t = flat(text || "");
         return fs.readFileSync(file, "utf8").split(/\r?\n/).map((l) => l.trim())
-            .filter((l) => l.length >= 3 && !l.startsWith("#"));
+            .filter((l) => l.length >= 3 && !l.startsWith("#") && t.includes(flat(l)));
     } catch {
         return [];
     }
@@ -328,7 +331,7 @@ function receiptFindings(result) {
 async function scrubFields(fields) {
     if (!fields.some((f) => f)) return fields.slice();
     try {
-        const scrub = await apiRequest("POST", "/v1/scrub", { text: fields.join(RECEIPT_FIELD_SEP), keep: ownIdentity() }, {
+        const scrub = await apiRequest("POST", "/v1/scrub", { text: fields.join(RECEIPT_FIELD_SEP), keep: ownIdentity(fields.join(RECEIPT_FIELD_SEP)) }, {
             apiKey: API_KEY,
             timeout: 10000
         });
@@ -350,7 +353,7 @@ async function saveScrubbedDoc(docsDir, sha, text) {
     const fs = require("fs/promises");
     const path = require("path");
     try {
-        const scrub = await apiRequest("POST", "/v1/scrub", { text, keep: ownIdentity() }, {
+        const scrub = await apiRequest("POST", "/v1/scrub", { text, keep: ownIdentity(text) }, {
             apiKey: API_KEY,
             timeout: 10000
         });
@@ -519,7 +522,7 @@ server.registerTool(
     },
     async ({ text }) => {
         try {
-            const result = await apiRequest("POST", "/v1/scrub", { text, keep: ownIdentity() }, {
+            const result = await apiRequest("POST", "/v1/scrub", { text, keep: ownIdentity(text) }, {
                 apiKey: API_KEY,
                 timeout: 10000  // Pattern scan server-side, no LLM — should be fast
             });

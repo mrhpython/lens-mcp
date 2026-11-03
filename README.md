@@ -14,7 +14,7 @@ Every AI tool asks the same model that wrote the answer whether it's any good. I
 
 The gate is **fail-closed**: a borderline case returns UNKNOWN, never a silent pass. There is no generation step, so it can't fabricate claims of its own — only check. It can still be wrong about a judgment; that is exactly why borderline cases return UNKNOWN instead of a confident yes.
 
-This is a local stdio boundary around the hosted Lens API (`api.soulfield.one`). It keeps repository access on the caller's machine and sends only the finished artifact text to the API gate.
+This is a local stdio boundary around the hosted Lens API (`api.soulfield.one`). It keeps repository access on the caller's machine and sends only the finished artifact text to the API gate. A scrub also sends the lines of your own identity file (`LENS_PUBLIC_IDENTITY_FILE`) that occur in that text, so they are not redacted.
 
 It exposes **two tiers**. The **gate tier** (3 tools) needs nothing but an API key. The **validator tier** (7 tools) adds one local orchestration entry point plus the optional `lens-kit` cross-file checks and defect memory that the single-document gate cannot see. Skip local evidence inputs and the gate tier works exactly as before.
 
@@ -142,6 +142,7 @@ Inputs of ~4,000 characters and up are submitted as an async job and polled to c
 | `LENS_KIT_BIN` | `lens-kit` | Path to the `lens-kit` CLI for the validator tier. Only needed if it is not on `PATH`. |
 | `LENS_KIT_TIMEOUT_MS` | `120000` | Timeout for a validator-tier command. On timeout the verdict is UNKNOWN, never a pass. |
 | `LENS_CATCHES_DIR` | `~/dev/tools/lens-kit` | Default working directory for the three `lens_catches_*` tools, so every catch lands in one `catches.jsonl`. A leading `~` is expanded. Falls back to the server's cwd if the directory does not exist. A `cwd` argument still wins. Catches can hold verbatim snippets, so `catches.jsonl` must stay out of git; the lens-kit repo ignores it. |
+| `LENS_PUBLIC_IDENTITY_FILE` | `~/.config/soulfield-lens/public-identity.txt` | Your own published details (name, postal address, contact email, phone), one per line. `/v1/scrub` calls send the lines that occur in the text as `keep`, so your own details are not redacted from your outgoing work; anyone else's still are. No file: nothing is kept. |
 | `LENS_RECEIPT_DIR` | unset | When set, each gate result from `validate_content`, `validate_artifact` and a completed `validation_submit` job appends one line to `<dir>/receipts.jsonl` (text hash, domain, context, per-lens verdicts, findings with short quotes; no document text). A leading `~` is expanded. The text, scrubbed by `POST /v1/scrub`, goes to `<dir>/private/docs/<sha256>.txt`, and `<dir>/private/.gitignore` holds `*`. The line's context, issues and quotes are scrubbed by one more `/v1/scrub` call; quotes are cut to 300 characters after the scrub. If a scrub fails, that text is not saved (`doc_status` or `findings_status` says so). The scrub finds structured identifiers only; names survive it. A write failure never fails the validation. |
 
 ## The rest of the product
