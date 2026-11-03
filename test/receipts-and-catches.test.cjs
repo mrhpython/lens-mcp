@@ -76,7 +76,9 @@ async function connect(t, env) {
     const transport = new StdioClientTransport({
         command: process.execPath,
         args: [SERVER],
-        env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env },
+        // No real identity file in tests unless a test names one.
+        env: { PATH: process.env.PATH, HOME: process.env.HOME,
+               LENS_PUBLIC_IDENTITY_FILE: "/nonexistent/lens-test-identity.txt", ...env },
         stderr: "pipe"
     });
     const client = new Client({ name: "receipts-test", version: "1" });
@@ -349,4 +351,30 @@ test("lens_catches_add rejects an unknown provenance before running lens-kit", a
     });
     assert.equal(response.isError, true);
     await assert.rejects(fs.stat(path.join(catchesDir, "fake-kit-call.json")));
+});
+
+
+test("scrub calls send the user's own published details as the keep list", async (t) => {
+    const api = await fakeApi(t);
+    const dir = await tmpDir(t, "lens-identity-");
+    const identity = path.join(dir, "identity.txt");
+    await fs.writeFile(identity, "# own details\nJo Example\njo@example.com\nx\n");
+    const client = await connect(t, {
+        SOULFIELD_API_BASE: api.base,
+        SOULFIELD_API_KEY: "fixture-key",
+        LENS_RECEIPT_DIR: dir,
+        LENS_PUBLIC_IDENTITY_FILE: identity
+    });
+    await client.callTool({ name: "scrub_pii", arguments: { text: TEXT } });
+    await client.callTool({ name: "validate_content", arguments: { text: TEXT, domain: "agency" } });
+    const scrubs = api.calls.filter((c) => c.path === "/v1/scrub");
+    assert.ok(scrubs.length >= 2);
+    for (const call of scrubs) assert.deepEqual(call.body.keep, ["Jo Example", "jo@example.com"]);
+});
+
+test("without an identity file the keep list is empty", async (t) => {
+    const api = await fakeApi(t);
+    const client = await connect(t, { SOULFIELD_API_BASE: api.base, SOULFIELD_API_KEY: "fixture-key" });
+    await client.callTool({ name: "scrub_pii", arguments: { text: TEXT } });
+    assert.deepEqual(api.calls.find((c) => c.path === "/v1/scrub").body.keep, []);
 });

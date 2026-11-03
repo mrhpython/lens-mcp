@@ -75,6 +75,24 @@ function expandHome(p) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * The user's own published details (name, postal address, contact email, phone), one per line, from
+ * LENS_PUBLIC_IDENTITY_FILE or ~/.config/soulfield-lens/public-identity.txt ('#' comments, lines under
+ * 3 characters skipped). Sent as /v1/scrub's "keep" list so they are not redacted: they belong in the
+ * user's outgoing work. Anyone else's details still are. No file: [] (the default for a new user).
+ * Read on every call, so an edit applies to the next scrub.
+ */
+function ownIdentity() {
+    const fs = require("fs");
+    const file = expandHome(process.env.LENS_PUBLIC_IDENTITY_FILE || "~/.config/soulfield-lens/public-identity.txt");
+    try {
+        return fs.readFileSync(file, "utf8").split(/\r?\n/).map((l) => l.trim())
+            .filter((l) => l.length >= 3 && !l.startsWith("#"));
+    } catch {
+        return [];
+    }
+}
+
 // Create MCP Server
 // Version is read from package.json rather than hardcoded: it had drifted to
 // 1.1.0 while the package shipped 1.1.1, so introspection reported a version
@@ -310,7 +328,7 @@ function receiptFindings(result) {
 async function scrubFields(fields) {
     if (!fields.some((f) => f)) return fields.slice();
     try {
-        const scrub = await apiRequest("POST", "/v1/scrub", { text: fields.join(RECEIPT_FIELD_SEP) }, {
+        const scrub = await apiRequest("POST", "/v1/scrub", { text: fields.join(RECEIPT_FIELD_SEP), keep: ownIdentity() }, {
             apiKey: API_KEY,
             timeout: 10000
         });
@@ -332,7 +350,7 @@ async function saveScrubbedDoc(docsDir, sha, text) {
     const fs = require("fs/promises");
     const path = require("path");
     try {
-        const scrub = await apiRequest("POST", "/v1/scrub", { text }, {
+        const scrub = await apiRequest("POST", "/v1/scrub", { text, keep: ownIdentity() }, {
             apiKey: API_KEY,
             timeout: 10000
         });
@@ -501,7 +519,7 @@ server.registerTool(
     },
     async ({ text }) => {
         try {
-            const result = await apiRequest("POST", "/v1/scrub", { text }, {
+            const result = await apiRequest("POST", "/v1/scrub", { text, keep: ownIdentity() }, {
                 apiKey: API_KEY,
                 timeout: 10000  // Pattern scan server-side, no LLM — should be fast
             });
