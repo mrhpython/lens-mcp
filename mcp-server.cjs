@@ -864,10 +864,12 @@ server.registerTool(
             snippet: z.string().optional().describe("The offending text, verbatim (a short fragment). With lenses_failed it makes the catch exportable as a training label."),
             lenses_failed: z.array(z.string()).optional().describe("Canonical lens keys the snippet failed, e.g. [\"truth\", \"causality\"]. lens-kit rejects an unknown key."),
             provenance: z.enum(["michael", "seat", "deterministic", "qwen"]).optional().describe("Who judged the lens label. Rows marked qwen are never exported as training labels."),
+            checker: z.enum(["lens", "euclid"]).optional().describe("Which checker caught this defect in real work."),
+            missed_by: z.enum(["lens", "euclid"]).optional().describe("The other checker ran on the same text and missed this defect. Omit when it did not run."),
             cwd: catchesCwdArg
         }
     },
-    async ({ catch: catchText, pattern, rule, artifact_type, domain, self_catch, snippet, lenses_failed, provenance, cwd }) => {
+    async ({ catch: catchText, pattern, rule, artifact_type, domain, self_catch, snippet, lenses_failed, provenance, checker, missed_by, cwd }) => {
         // The record goes through lens-kit's --from-json path: one JSON file
         // carries every field, so the snippet keeps its exact bytes and newlines
         // and no text passes through argv. The file is private and removed after.
@@ -876,6 +878,8 @@ server.registerTool(
         if (snippet) record.snippet = snippet;
         if (lenses_failed && lenses_failed.length) record.lenses_failed = lenses_failed;
         if (provenance) record.provenance = provenance;
+        if (checker) record.checker = checker;
+        if (missed_by) record.missed_by = missed_by;
         const fs = require("fs/promises");
         const os = require("os");
         const path = require("path");

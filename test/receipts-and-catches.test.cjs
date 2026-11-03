@@ -338,6 +338,31 @@ test("lens_catches_add passes snippet, lenses_failed and provenance via --from-j
     await assert.rejects(fs.stat(call.args[3]));
 });
 
+test("lens_catches_add passes checker and missed_by via --from-json", async (t) => {
+    const kitDir = await tmpDir(t, "lens-kit-bin-");
+    const catchesDir = await tmpDir(t, "lens-catches-");
+    const client = await connect(t, {
+        LENS_KIT_BIN: await fakeKit(kitDir),
+        LENS_CATCHES_DIR: catchesDir
+    });
+    const response = await client.callTool({
+        name: "lens_catches_add",
+        arguments: {
+            catch: "Plan conclusion needs an unstated premise",
+            pattern: "unstated premise",
+            rule: "state every premise the conclusion uses",
+            artifact_type: "plan",
+            domain: "agency",
+            checker: "euclid",
+            missed_by: "lens"
+        }
+    });
+    assert.equal(response.isError, undefined);
+    const call = JSON.parse(await fs.readFile(path.join(catchesDir, "fake-kit-call.json"), "utf8"));
+    assert.equal(call.record.checker, "euclid");
+    assert.equal(call.record.missed_by, "lens");
+});
+
 test("lens_catches_add rejects an unknown provenance before running lens-kit", async (t) => {
     const kitDir = await tmpDir(t, "lens-kit-bin-");
     const catchesDir = await tmpDir(t, "lens-catches-");
